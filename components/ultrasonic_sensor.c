@@ -5,7 +5,7 @@
  *     Author:         carlitos (benzon.salazar@gmail.com)
  *
  * Last Modified by:   carrliitos
- * Last Modified time: 2024-12-04 01:35:36
+ * Last Modified time: 2024-12-04 02:18:49
  */
 
 #include <stdio.h>
@@ -22,6 +22,9 @@
 #include "mbedtls/md.h"
 #include "mbedtls/pk.h"
 #include "mbedtls/error.h"
+#include "mbedtls/entropy.h"
+#include "mbedtls/ctr_drbg.h"
+
 #include "key_loader.h"
 
 #include "ultrasonic_sensor.h"
@@ -33,7 +36,6 @@
 #define MAX_PAYLOAD   256
 
 static char jwt_token[1024];
-const char *PRIVATE_KEY = NULL;  // Declare PRIVATE_KEY as const char*
 
 /**
  * Generate a JWT for Google Pub/Sub authentication
@@ -68,36 +70,56 @@ static esp_err_t generate_jwt(char *jwt, size_t jwt_len) {
   mbedtls_base64_encode((unsigned char *)header_base64, sizeof(header_base64), &out_len, (unsigned char *)header, strlen(header));
   mbedtls_base64_encode((unsigned char *)payload_base64, sizeof(payload_base64), &out_len, (unsigned char *)payload, strlen(payload));
 
+  if (strlen(header_base64) == 0 || strlen(payload_base64) == 0) {
+    ESP_LOGE(TAG, "Base64 strings are empty");
+    return ESP_FAIL;
+  }
+
   // Create signing input
   char signing_input[512];
-  snprintf(signing_input, sizeof(signing_input), "%s.%s", header_base64, payload_base64);
+  int snprintf_result = snprintf(signing_input, sizeof(signing_input), "%s.%s", header_base64, payload_base64);
+  if (snprintf_result < 0 || snprintf_result >= sizeof(signing_input)) {
+    ESP_LOGE(TAG, "Failed to create signing input. Buffer too small or snprintf failed.");
+    return ESP_FAIL;
+  }
+  ESP_LOGI(TAG, "Signing Input: %s", signing_input);
+
+  // Initialize RNG context
+  mbedtls_entropy_context entropy;
+  mbedtls_ctr_drbg_context ctr_drbg;
+  mbedtls_entropy_init(&entropy);
+  mbedtls_ctr_drbg_init(&ctr_drbg);
+
+  const char *pers = "jwt_sign";
+  int ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy, (const unsigned char *)pers, strlen(pers));
+  if (ret != 0) {
+    ESP_LOGE(TAG, "Failed to seed RNG: %d", ret);
+    return ESP_FAIL;
+  }
 
   // Sign the input
   unsigned char signature[256];
   mbedtls_pk_context pk_context;
   mbedtls_pk_init(&pk_context);
   mbedtls_pk_parse_key(&pk_context, (const unsigned char *)PRIVATE_KEY, strlen(PRIVATE_KEY) + 1, NULL, 0, NULL, NULL);
-  
-  ESP_LOGI(TAG, "Header: %s", header);
-  ESP_LOGI(TAG, "Payload: %s", payload);
-  ESP_LOGI(TAG, "Private Key: %s", PRIVATE_KEY);
 
+  // Perform signing
   size_t sig_len;
-  int ret = mbedtls_pk_sign(&pk_context, 
-                            MBEDTLS_MD_SHA256, 
-                            (unsigned char *)signing_input, 
-                            strlen(signing_input), 
-                            signature, 
-                            sizeof(signature), 
-                            &sig_len, 
-                            NULL, 
-                            NULL);
-  mbedtls_pk_free(&pk_context);
-
+  ret = mbedtls_pk_sign(&pk_context, MBEDTLS_MD_SHA256, (unsigned char *)signing_input, strlen(signing_input),
+                        signature, sizeof(signature), &sig_len, mbedtls_ctr_drbg_random, &ctr_drbg);
   if (ret != 0) {
     ESP_LOGE(TAG, "Failed to sign JWT: %d", ret);
+    mbedtls_ctr_drbg_free(&ctr_drbg);
+    mbedtls_entropy_free(&entropy);
     return ESP_FAIL;
   }
+
+  ESP_LOGI(TAG, "JWT signed successfully, signature length: %zu", sig_len);
+
+  // Clean up
+  mbedtls_ctr_drbg_free(&ctr_drbg);
+  mbedtls_entropy_free(&entropy);
+  mbedtls_pk_free(&pk_context);
 
   // Base64 encode signature
   char signature_base64[512];
