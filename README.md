@@ -1,4 +1,4 @@
-# ESP32-S3-WROOM-2 Ultrasonic Sensor Datalogging to Google Cloud Platform
+# ESP32-S3-WROOM-2 Ultrasonic Sensor
 
 ## ESP32 with HC-SR04 Ultrasonic Sensor
 
